@@ -47,8 +47,9 @@ struct AlignmentData {
 };
 
 struct Block {
-    Word P;  // Pvin
-    Word M;  // Mvin
+    // P[i] and M[i] define vin of cell[i]: vin = cell[i] - cell[i-1].
+    Word P;  // Pvin  Bitset, P[i] == 1 if vin/vout is +1, otherwise P[i] == 0.
+    Word M;  // Mvin  Bitset, M[i] == 1 if vin/vout is -1, otherwise M[i] == 0.
     int score; // score of last cell in block;
 
     Block() {}
@@ -400,23 +401,20 @@ static inline unsigned char* createReverseCopy(const unsigned char* const seq, c
  * Corresponds to Advance_Block function from Myers.
  * Calculates one word(block), which is part of a column.
  * Highest bit of word (one most to the left) is most bottom cell of block from column.
- * Pv[i] and Mv[i] define vin of cell[i]: vin = cell[i] - cell[i-1].
- * @param [in] Pv  Bitset, Pv[i] == 1 if vin is +1, otherwise Pv[i] == 0.
- * @param [in] Mv  Bitset, Mv[i] == 1 if vin is -1, otherwise Mv[i] == 0.
+ * @param [in,out] block  The block to act on. P and M will be updated.
  * @param [in] Eq  Bitset, Eq[i] == 1 if match, 0 if mismatch.
  * @param [in] hin  Will be +1, 0 or -1.
- * @param [out] PvOut  Bitset, PvOut[i] == 1 if vout is +1, otherwise PvOut[i] == 0.
- * @param [out] MvOut  Bitset, MvOut[i] == 1 if vout is -1, otherwise MvOut[i] == 0.
  * @param [out] hout  Will be +1, 0 or -1.
  */
-static inline int calculateBlock(Word Pv, Word Mv, Word Eq, const int hin,
-                                 Word &PvOut, Word &MvOut) {
+static inline int calculateBlock(Block &block, Word Eq, const int hin) {
     // hin can be 1, -1 or 0.
     // 1  -> 00...01
     // 0  -> 00...00
     // -1 -> 11...11 (2-complement)
 
     Word hinIsNeg = static_cast<Word>(hin >> 2) & WORD_1; // 00...001 if hin is -1, 00...000 if 0 or 1
+    Word Pv = block.P;
+    Word Mv = block.M;
 
     Word Xv = Eq | Mv;
     // This is instruction below written using 'if': if (hin < 0) Eq |= (Word)1;
@@ -440,8 +438,8 @@ static inline int calculateBlock(Word Pv, Word Mv, Word Eq, const int hin,
     // This is instruction below written using 'if': if (hin > 0) Ph |= (Word)1;
     Ph |= static_cast<Word>((hin + 1) >> 1);
 
-    PvOut = Mh | ~(Xv | Ph);
-    MvOut = Ph & Xv;
+    block.P = Mh | ~(Xv | Ph);
+    block.M = Ph & Xv;
 
     return hout;
 }
@@ -591,7 +589,7 @@ static int myersCalcEditDistanceSemiGlobal(
         bl = firstBlock;
         Peq_c += firstBlock;
         for (int b = firstBlock; b <= lastBlock; b++) {
-            hout = calculateBlock(blocks[bl].P, blocks[bl].M, *Peq_c, hout, blocks[bl].P, blocks[bl].M);
+            hout = calculateBlock(blocks[bl], *Peq_c, hout);
             blocks[bl].score += hout;
             bl++; Peq_c++;
         }
@@ -605,7 +603,7 @@ static int myersCalcEditDistanceSemiGlobal(
             lastBlock++; bl++; Peq_c++;
             blocks[bl].P = static_cast<Word>(-1); // All 1s
             blocks[bl].M = static_cast<Word>(0);
-            blocks[bl].score = blocks[bl - 1].score - hout + WORD_SIZE + calculateBlock(blocks[bl].P, blocks[bl].M, *Peq_c, hout, blocks[bl].P, blocks[bl].M);
+            blocks[bl].score = blocks[bl - 1].score - hout + WORD_SIZE + calculateBlock(blocks[bl], *Peq_c, hout);
         } else {
             while (lastBlock >= firstBlock && blocks[bl].score >= k + WORD_SIZE) {
                 lastBlock--; bl--; Peq_c--;
@@ -779,7 +777,7 @@ static int myersCalcEditDistanceNW(const Word* const Peq, const int W, const int
         int hout = 1;
         bl = firstBlock;
         for (int b = firstBlock; b <= lastBlock; b++) {
-            hout = calculateBlock(blocks[bl].P, blocks[bl].M, Peq_c[b], hout, blocks[bl].P, blocks[bl].M);
+            hout = calculateBlock(blocks[bl], Peq_c[b], hout);
             blocks[bl].score += hout;
             bl++;
         }
@@ -803,7 +801,7 @@ static int myersCalcEditDistanceNW(const Word* const Peq, const int W, const int
             lastBlock++; bl++;
             blocks[bl].P = static_cast<Word>(-1); // All 1s
             blocks[bl].M = static_cast<Word>(0);
-            int newHout = calculateBlock(blocks[bl].P, blocks[bl].M, Peq_c[lastBlock], hout, blocks[bl].P, blocks[bl].M);
+            int newHout = calculateBlock(blocks[bl], Peq_c[lastBlock], hout);
             blocks[bl].score = blocks[bl - 1].score - hout + WORD_SIZE + newHout;
             hout = newHout;
         }
