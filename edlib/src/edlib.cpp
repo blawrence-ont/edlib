@@ -94,6 +94,14 @@ public:
     }
 };
 
+// Helper to split horizontal deltas (hin/hout) for performance.
+struct SplitDeltas {
+    explicit SplitDeltas(int hin) : P(hin > 0), M(hin < 0) {}
+    Word P; // 1 when hin/hout == +1, otherwise 0.
+    Word M; // 1 when hin/hout == -1, otherwise 0.
+    int value() const { return P - M; } // Can only be +1, 0, or -1.
+};
+
 } // anonymous namespace
 
 static int myersCalcEditDistanceSemiGlobal(const Word* Peq, int W, int maxNumBlocks,
@@ -403,45 +411,37 @@ static inline unsigned char* createReverseCopy(const unsigned char* const seq, c
  * Highest bit of word (one most to the left) is most bottom cell of block from column.
  * @param [in,out] block  The block to act on. P and M will be updated.
  * @param [in] Eq  Bitset, Eq[i] == 1 if match, 0 if mismatch.
- * @param [in] hin  Will be +1, 0 or -1.
- * @param [out] hout  Will be +1, 0 or -1.
+ * @param [in,out] HInOut  hin/hout, will be +1, 0, or -1.
  */
-static inline int calculateBlock(Block &block, Word Eq, const int hin) {
-    // hin can be 1, -1 or 0.
-    // 1  -> 00...01
-    // 0  -> 00...00
-    // -1 -> 11...11 (2-complement)
-
-    Word hinIsNeg = static_cast<Word>(hin >> 2) & WORD_1; // 00...001 if hin is -1, 00...000 if 0 or 1
-    Word Pv = block.P;
-    Word Mv = block.M;
+static inline void calculateBlock(Block &block, Word Eq, SplitDeltas &HInOut) {
+    Word Pv = block.P; // 1 if vin > 0, otherwise 0.
+    Word Mv = block.M; // 1 if vin < 0, otherwise 0.
+    Word Phin = HInOut.P; // 1 if hin > 0, otherwise 0.
+    Word Mhin = HInOut.M; // 1 if hin < 0, otherwise 0.
 
     Word Xv = Eq | Mv;
     // This is instruction below written using 'if': if (hin < 0) Eq |= (Word)1;
-    Eq |= hinIsNeg;
+    Eq |= Mhin;
     Word Xh = (((Eq & Pv) + Pv) ^ Pv) | Eq;
 
     Word Ph = Mv | ~(Xh | Pv);
     Word Mh = Pv & Xh;
 
-    int hout = 0;
-    // This is instruction below written using 'if': if (Ph & HIGH_BIT_MASK) hout = 1;
-    hout = (Ph & HIGH_BIT_MASK) >> (WORD_SIZE - 1);
-    // This is instruction below written using 'if': if (Mh & HIGH_BIT_MASK) hout = -1;
-    hout -= (Mh & HIGH_BIT_MASK) >> (WORD_SIZE - 1);
+    // This is instruction below written using 'if': if (Ph & HIGH_BIT_MASK) HInOut.P = 1;
+    HInOut.P = Ph >> (WORD_SIZE - 1);
+    // This is instruction below written using 'if': if (Mh & HIGH_BIT_MASK) HInOut.M = 1;
+    HInOut.M = Mh >> (WORD_SIZE - 1);
 
     Ph <<= 1;
     Mh <<= 1;
 
     // This is instruction below written using 'if': if (hin < 0) Mh |= (Word)1;
-    Mh |= hinIsNeg;
+    Mh |= Mhin;
     // This is instruction below written using 'if': if (hin > 0) Ph |= (Word)1;
-    Ph |= static_cast<Word>((hin + 1) >> 1);
+    Ph |= Phin;
 
     block.P = Mh | ~(Xv | Ph);
     block.M = Ph & Xv;
-
-    return hout;
 }
 
 /**
@@ -585,25 +585,28 @@ static int myersCalcEditDistanceSemiGlobal(
         const Word* Peq_c = Peq + (*targetChar) * maxNumBlocks;
 
         //----------------------- Calculate column -------------------------//
-        int hout = startHout;
+        SplitDeltas hout(startHout);
         bl = firstBlock;
         Peq_c += firstBlock;
         for (int b = firstBlock; b <= lastBlock; b++) {
-            hout = calculateBlock(blocks[bl], *Peq_c, hout);
-            blocks[bl].score += hout;
+            calculateBlock(blocks[bl], *Peq_c, hout);
+            blocks[bl].score += hout.value();
             bl++; Peq_c++;
         }
         bl--; Peq_c--;
         //------------------------------------------------------------------//
 
         //---------- Adjust number of blocks according to Ukkonen ----------//
-        if ((lastBlock < maxNumBlocks - 1) && (blocks[bl].score - hout <= k) // bl is pointing to last block
-            && ((*(Peq_c + 1) & WORD_1) || hout < 0)) { // Peq_c is pointing to last block
+        if ((lastBlock < maxNumBlocks - 1) && (blocks[bl].score - hout.value() <= k) // bl is pointing to last block
+            && ((*(Peq_c + 1) & WORD_1) || hout.value() < 0)) { // Peq_c is pointing to last block
             // If score of left block is not too big, calculate one more block
             lastBlock++; bl++; Peq_c++;
             blocks[bl].P = static_cast<Word>(-1); // All 1s
             blocks[bl].M = static_cast<Word>(0);
-            blocks[bl].score = blocks[bl - 1].score - hout + WORD_SIZE + calculateBlock(blocks[bl], *Peq_c, hout);
+            int oldHout = hout.value();
+            calculateBlock(blocks[bl], *Peq_c, hout);
+            int newHout = hout.value();
+            blocks[bl].score = blocks[bl - 1].score - oldHout + WORD_SIZE + newHout;
         } else {
             while (lastBlock >= firstBlock && blocks[bl].score >= k + WORD_SIZE) {
                 lastBlock--; bl--; Peq_c--;
@@ -774,11 +777,11 @@ static int myersCalcEditDistanceNW(const Word* const Peq, const int W, const int
         const Word* Peq_c = Peq + *targetChar * maxNumBlocks;
 
         //----------------------- Calculate column -------------------------//
-        int hout = 1;
+        SplitDeltas hout(1);
         bl = firstBlock;
         for (int b = firstBlock; b <= lastBlock; b++) {
-            hout = calculateBlock(blocks[bl], Peq_c[b], hout);
-            blocks[bl].score += hout;
+            calculateBlock(blocks[bl], Peq_c[b], hout);
+            blocks[bl].score += hout.value();
             bl++;
         }
         bl--;
@@ -801,9 +804,10 @@ static int myersCalcEditDistanceNW(const Word* const Peq, const int W, const int
             lastBlock++; bl++;
             blocks[bl].P = static_cast<Word>(-1); // All 1s
             blocks[bl].M = static_cast<Word>(0);
-            int newHout = calculateBlock(blocks[bl], Peq_c[lastBlock], hout);
-            blocks[bl].score = blocks[bl - 1].score - hout + WORD_SIZE + newHout;
-            hout = newHout;
+            int oldHout = hout.value();
+            calculateBlock(blocks[bl], Peq_c[lastBlock], hout);
+            int newHout = hout.value();
+            blocks[bl].score = blocks[bl - 1].score - oldHout + WORD_SIZE + newHout;
         }
 
         // While block is out of band, move one block up.
